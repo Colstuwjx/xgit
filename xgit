@@ -1,0 +1,120 @@
+#!/bin/bash
+# This code should (try to) follow Google's Shell Style Guide
+# (https://google.github.io/styleguide/shell.xml)
+set -e
+
+CMD=$1
+GITDIR=".xgit"
+
+warn () {
+  echo "$@" >&2
+}
+
+die () {
+  status="$1"
+  shift
+  warn "$@"
+  exit "$status"
+}
+
+# each blob should be `<ascii tag without space> + <space> + <ascii decimal
+# size> + <byte\0> + <binary object data>`.
+githash() {
+  TYPE="$1"
+  FILE="$2"
+  HASH_VALUE="$((echo -en ${TYPE}' '$(wc -c < ${FILE}|xargs)'\00';cat ${FILE})|shasum -a 1|cut -d ' ' -f 1)"
+  echo $HASH_VALUE
+}
+
+gitcontent() {
+  TYPE="$1"
+  FILE="$2"
+  GIT_CONTENT="$(echo -en ${TYPE}' '$(wc -c < ${FILE}|xargs)'\00';cat ${FILE})"
+  echo $GIT_CONTENT
+}
+
+check() {
+  if [ ! -d $GITDIR ] || [ ! -d $GITDIR/objects ]; then
+      die 1 "you must init the xgit first, try \`xgit init\`."
+  fi
+}
+
+workall() {
+  FILEPATH="$1"
+  EXEC_MODULE="$2"
+  [ "$FILEPATH" ] || exit 1
+  for fp in $FILEPATH; do
+      if [ -f $fp ]; then
+          $EXEC_MODULE $fp
+      elif [ -d $fp ]; then
+          workall $fp $EXEC_MODULE
+      else
+          die 1 "invalid file path ${FILEPATH}."
+      fi
+  done
+}
+
+# FIXME: seems has bug...
+add_into_index() {
+  FILENAME="$1"
+  FILE_BLOB_OBJECT=$(githash "blob" $FILENAME)
+  echo "xgit added the following files into index: "
+  [ ! -f $GITDIR/index ] && touch $GITDIR/index
+
+  grep "${FILENAME}" $GITDIR/index && {
+    grep -v "${FILENAME}" $GITDIR/index > $GITDIR/replace.index
+    mv $GITDIR/replace.index $GITDIR/index
+    echo "${FILENAME} ${FILE_BLOB_OBJECT}" >> $GITDIR/index
+  } || echo "${FILENAME} ${FILE_BLOB_OBJECT}" >> $GITDIR/index
+
+  OBJECTS_DIR_PREFIX=${FILE_BLOB_OBJECT:0:2}
+  OBJECTS_DESTINATION=${FILE_BLOB_OBJECT:2}
+  [ ! -d $GITDIR/objects/${OBJECTS_DIR_PREFIX} ] && mkdir -p $GITDIR/objects/${OBJECTS_DIR_PREFIX}
+  echo -n $(gitcontent "blob" $FILENAME) > $GITDIR/objects/${OBJECTS_DIR_PREFIX}/${OBJECTS_DESTINATION}
+}
+
+[ "$CMD" ] || {
+  echo "xgit - another git implementation via shell."
+  echo "                     "
+  echo "Syntax:"
+  echo "xgit init"
+  echo "xgit status"
+  echo "xgit add [filepath]"
+  echo "xgit commit [message]"
+  exit 1
+}
+
+case "$CMD" in
+  init)
+    [ ! -d $GITDIR ] && mkdir -p $GITDIR
+    [ ! -d $GITDIR/objects ] && mkdir -p $GITDIR/objects
+    ;;
+  status)
+    echo "xgit status"
+    echo "                    "
+    echo "Staged: "
+    [ -s $GITDIR/index ] && cat $GITDIR/index
+    echo "                    "
+    echo "Changes not staged: "
+    for fp in $(ls .)
+    do
+        # TODO: check diff with index and repository.
+        echo $fp
+    done
+    ;;
+  add)
+    check
+    shift 1
+    for fp in $@; do
+        for f in $fp; do
+            workall $f add_into_index
+        done
+    done
+    ;;
+  commit)
+    echo "TODO."
+    ;;
+  *)
+    die 1 "Unknown command: $CMD."
+    ;;
+esac
