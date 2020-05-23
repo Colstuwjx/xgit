@@ -5,6 +5,7 @@ set -e
 
 CMD=$1
 GITDIR=".xgit"
+HEAD_DEFAULT="master"
 
 warn () {
   echo "$@" >&2
@@ -39,7 +40,7 @@ check() {
   fi
 }
 
-workall() {
+walkall() {
   FILEPATH="$1"
   EXEC_MODULE="$2"
   [ "$FILEPATH" ] || exit 1
@@ -47,30 +48,86 @@ workall() {
       if [ -f $fp ]; then
           $EXEC_MODULE $fp
       elif [ -d $fp ]; then
-          workall $fp $EXEC_MODULE
+          walkall $fp $EXEC_MODULE
       else
           die 1 "invalid file path ${FILEPATH}."
       fi
   done
 }
 
-# FIXME: seems has bug...
+check_in_index() {
+  FILENAME="$1"
+  INDEX_FILE=$(cat $GITDIR/index | grep "${FILENAME}" | awk '{print $2}')
+  if [ ! $INDEX_FILE ]; then
+      echo "1"
+  else
+      echo $INDEX_FILE
+  fi
+}
+
 add_into_index() {
+  # TODO: 和当前的head比较是否有diff，如果有，允许加入到index，如果没有，不做任何事情.
+  # 如果没有head（当前默认只支持一个head，不支持branch功能）即全部允许加入到index.
+
   FILENAME="$1"
   FILE_BLOB_OBJECT=$(githash "blob" $FILENAME)
   echo "xgit added the following files into index: "
-  [ ! -f $GITDIR/index ] && touch $GITDIR/index
+  if [ ! -f $GITDIR/index ]; then
+      touch $GITDIR/index
+  fi
 
-  grep "${FILENAME}" $GITDIR/index && {
-    grep -v "${FILENAME}" $GITDIR/index > $GITDIR/replace.index
-    mv $GITDIR/replace.index $GITDIR/index
-    echo "${FILENAME} ${FILE_BLOB_OBJECT}" >> $GITDIR/index
-  } || echo "${FILENAME} ${FILE_BLOB_OBJECT}" >> $GITDIR/index
+  INDEX_FILE=$(check_in_index $FILENAME)
+  if [ $INDEX_FILE -eq 1 ]; then
+      echo "adding ${FILENAME} to index"
+      echo "${FILENAME} ${FILE_BLOB_OBJECT}" >> $GITDIR/index
+  else
+      echo "updating ${FILENAME} inside index"
+      grep -v "${FILENAME}" $GITDIR/index > $GITDIR/replace.index
+      mv $GITDIR/replace.index $GITDIR/index
+      echo "${FILENAME} ${FILE_BLOB_OBJECT}" >> $GITDIR/index
+  fi
 
   OBJECTS_DIR_PREFIX=${FILE_BLOB_OBJECT:0:2}
   OBJECTS_DESTINATION=${FILE_BLOB_OBJECT:2}
-  [ ! -d $GITDIR/objects/${OBJECTS_DIR_PREFIX} ] && mkdir -p $GITDIR/objects/${OBJECTS_DIR_PREFIX}
+  if [ ! -d $GITDIR/objects/${OBJECTS_DIR_PREFIX} ]; then
+      mkdir -p $GITDIR/objects/${OBJECTS_DIR_PREFIX}
+  fi
   echo -n $(gitcontent "blob" $FILENAME) > $GITDIR/objects/${OBJECTS_DIR_PREFIX}/${OBJECTS_DESTINATION}
+}
+
+show_status() {
+  echo "xgit status"
+  echo "                    "
+  if [ -s $GITDIR/index ]; then
+      echo "Staged: "
+      cat $GITDIR/index
+      echo "                    "
+  else
+      echo "Staged: "
+      echo "                    "
+  fi
+  echo "Changes not staged: "
+  for fp in $(ls .)
+  do
+      # compare with refs or staging area.
+      if [ -f $GITDIR/refs/heads/$HEAD_DEFAULT ]; then
+          # 如果index里包含该文件，和index里的object对比
+          # 其次，找到refs指向的commit，然后根据这个commit遍历对应的tree和blob，对比差异.
+          CURRENT_FP_GITHASH=$(githash "blob" $fp)
+          echo "comparing $fp hashvalue $CURRENT_FP_GITHASH with stage and repository."
+      else
+          # 比较当前index区域，然后展示和work area diff.
+          CURRENT_FP_GITHASH=$(githash "blob" $fp)
+          INDEX_FILE=$(check_in_index $fp)
+          if [ "$INDEX_FILE" == "1" ]; then
+              echo "Untracked: $fp"
+          else
+              if [ "$INDEX_FILE" != "$CURRENT_FP_GITHASH" ]; then
+                echo "$fp"
+              fi
+          fi
+      fi
+  done
 }
 
 [ "$CMD" ] || {
@@ -88,26 +145,18 @@ case "$CMD" in
   init)
     [ ! -d $GITDIR ] && mkdir -p $GITDIR
     [ ! -d $GITDIR/objects ] && mkdir -p $GITDIR/objects
+    [ ! -d $GITDIR/refs/heads ] && mkdir -p $GITDIR/refs/heads
     ;;
   status)
-    echo "xgit status"
-    echo "                    "
-    echo "Staged: "
-    [ -s $GITDIR/index ] && cat $GITDIR/index
-    echo "                    "
-    echo "Changes not staged: "
-    for fp in $(ls .)
-    do
-        # TODO: check diff with index and repository.
-        echo $fp
-    done
+    check
+    show_status
     ;;
   add)
     check
     shift 1
     for fp in $@; do
         for f in $fp; do
-            workall $f add_into_index
+            walkall $f add_into_index
         done
     done
     ;;
