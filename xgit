@@ -20,6 +20,7 @@ die () {
 
 # each blob should be `<ascii tag without space> + <space> + <ascii decimal
 # size> + <byte\0> + <binary object data>`.
+# types: commit tree blob tag
 githash() {
   TYPE="$1"
   FILE="$2"
@@ -53,6 +54,62 @@ walkall() {
           die 1 "invalid file path ${FILEPATH}."
       fi
   done
+}
+
+find_object() {
+  FILEHASH=$1
+  OBJECT_PREFIX=${FILEHASH:0:2}
+  OBJECT_DEST=${FILEHASH:2}
+  FIND_OBJ="1"
+  if [ -d $GITDIR/objects/${OBJECT_PREFIX} ]; then
+      FIND_OBJ=$(ls $GITDIR/objects/${OBJECT_PREFIX}/* | grep ${OBJECT_DEST} | head -n 1 || echo "1")
+  fi
+  echo $FIND_OBJ
+}
+
+check_object_type() {
+  OBJECT_LOCATION=$1
+  OBJECT_HEADER=$(head -c 10 $OBJECT_LOCATION)
+  case "$OBJECT_HEADER" in
+  *commit*)
+    echo "commit"
+    ;;
+  *tree*)
+    echo "tree"
+    ;;
+  *blob*)
+    echo "blob"
+    ;;
+  *tag*)
+    echo "tag"
+    ;;
+  *)
+    die 1 "Unknown object type."
+    ;;
+  esac
+}
+
+cat_object_file() {
+  CAT_ARG="$1"
+  CAT_FILEHASH="$2"
+  OBJECT_LOCATION=$(find_object $CAT_FILEHASH)
+
+  if [ $OBJECT_LOCATION == "1" ]; then
+      die 1 "invalid hash $CAT_FILEHASH"
+  fi
+
+  case "$CAT_ARG" in
+  -t)
+    OBJECT_TYPE=$(check_object_type $OBJECT_LOCATION)
+    echo $OBJECT_TYPE
+    ;;
+  -p)
+    # TODO: split header and body, print out body...
+    ;;
+  *)
+    die 1 "Unknown argument: $CAT_ARG."
+    ;;
+  esac
 }
 
 check_in_index() {
@@ -96,6 +153,9 @@ add_into_index() {
 }
 
 show_status() {
+  if [ ! -f $GITDIR/index ]; then
+      touch $GITDIR/index
+  fi
   echo "xgit status"
   echo "                    "
   if [ -s $GITDIR/index ]; then
@@ -160,7 +220,15 @@ case "$CMD" in
         done
     done
     ;;
+  cat-file)
+    check
+    shift 1
+    cat_object_file $@
+    ;;
   commit)
+    # 新建一个commit对象，将stage area内容提交，生成一个commit object
+    # commit object里包含parent及tree，tree object则表示当前一个目录的object树
+    # tree object里可以嵌套tree和blob，这样即可串联所有文件.
     echo "TODO."
     ;;
   *)
