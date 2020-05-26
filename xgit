@@ -122,7 +122,10 @@ write_object() {
   if [ ! -d $GITDIR/objects/${OBJECTS_DIR_PREFIX} ]; then
       mkdir -p $GITDIR/objects/${OBJECTS_DIR_PREFIX}
   fi
+  PREV_IFS=$IFS
+  export IFS=""
   echo $(gitcontent $TYPE $CONTENT_PATH) > $GITDIR/objects/${OBJECTS_DIR_PREFIX}/${OBJECTS_DESTINATION}
+  export IFS=${PREV_IFS}
 }
 
 calc_blob() {
@@ -205,18 +208,55 @@ add_into_index() {
 }
 
 commit_into_repo() {
-  COMMIT_MESSAGE=$1
+  COMMIT_ARG=$1
   if [ ! -s $GITDIR/index ]; then
       die 1 "Nothing to commit."
   fi
-  # first, create tree commit.
-  for fc in $(cat $GITDIR/index)
+
+  COMMIT_MSG=""
+  case "$COMMIT_ARG" in
+  -m)
+    shift 1
+    COMMIT_MSG=$@
+    ;;
+  *)
+    die 1 "Unknown argument: $COMMIT_ARG."
+    ;;
+  esac
+
+  if [ "EXIST_${COMMIT_MSG}" == "EXIST_" ]; then
+      die 1 "Invalid commit message."
+  fi
+
+  true > $GITDIR/tree.index
+  cat $GITDIR/index | while read line 
   do
-      echo $fc
+      echo $line >> $GITDIR/tree.index
   done
-  # calculate index tree hash and create the tree object.
-  # finally, create commit object.
-  echo "TODO: create commit object with message ${COMMIT_MESSAGE}"
+
+  DIR_TREE_OBJECT_HASH=$(githash "tree" "$GITDIR/tree.index")
+  write_object "$GITDIR/tree.index" "tree" "${DIR_TREE_OBJECT_HASH}"
+
+  PARENT_HASH=""
+  if [ -f $GITDIR/refs/heads/$HEAD_DEFAULT ]; then
+      PARENT_HASH=$(cat $GITDIR/refs/heads/$HEAD_DEFAULT)
+  fi
+
+  true > $GITDIR/commit.index
+  echo "tree ${DIR_TREE_OBJECT_HASH}" >> $GITDIR/commit.index
+  if [ "EXIST_"$PARENT_HASH == "EXIST_" ]; then
+      echo "parent ${PARENT_OBJECT_HASH}" >> $GITDIR/commit.index
+  fi
+  echo "${COMMIT_MSG}" >> $GITDIR/commit.index
+
+  COMMIT_OBJECT_HASH=$(githash "commit" "$GITDIR/commit.index")
+  write_object "$GITDIR/commit.index" "commit" "${COMMIT_OBJECT_HASH}"
+  echo "${COMMIT_OBJECT_HASH}" > $GITDIR/refs/heads/$HEAD_DEFAULT
+  true > $GITDIR/index
+
+  # clean up
+  \rm -f $GITDIR/tree.index
+  \rm -f $GITDIR/commit.index
 }
 
 show_status() {
@@ -315,6 +355,7 @@ case "$CMD" in
     ;;
   commit)
     check
+    shift 1
     commit_into_repo $@
     ;;
   *)
