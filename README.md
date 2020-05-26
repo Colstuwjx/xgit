@@ -11,6 +11,7 @@ Shell version git implementation for fun.
 ## Known issues
 
 * `gitcontent` result didn't match the raw command execution..
+* only works for the first commit..
 
 ## Design
 
