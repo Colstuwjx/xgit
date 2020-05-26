@@ -6,6 +6,7 @@ set -e
 CMD=$1
 GITDIR=".xgit"
 HEAD_DEFAULT="master"
+TMP_CACHE_NAME="/tmp/.xgit_cache_"
 
 warn () {
   echo "$@" >&2
@@ -39,21 +40,6 @@ check() {
   if [ ! -d $GITDIR ] || [ ! -d $GITDIR/objects ]; then
       die 1 "you must init the xgit first, try \`xgit init\`."
   fi
-}
-
-walkall() {
-  FILEPATH="$1"
-  EXEC_MODULE="$2"
-  [ "$FILEPATH" ] || exit 1
-  for fp in $FILEPATH; do
-      if [ -f $fp ]; then
-          $EXEC_MODULE $fp
-      elif [ -d $fp ]; then
-          walkall $fp $EXEC_MODULE
-      else
-          die 1 "invalid file path ${FILEPATH}."
-      fi
-  done
 }
 
 find_object() {
@@ -104,7 +90,8 @@ cat_object_file() {
     echo $OBJECT_TYPE
     ;;
   -p)
-    # TODO: split header and body, print out body...
+    # FIXME: trim header...
+    cat ${OBJECT_LOCATION}
     ;;
   *)
     die 1 "Unknown argument: $CAT_ARG."
@@ -113,43 +100,123 @@ cat_object_file() {
 }
 
 check_in_index() {
-  FILENAME="$1"
-  INDEX_FILE=$(cat $GITDIR/index | grep "${FILENAME}" | awk '{print $2}')
-  if [ ! $INDEX_FILE ]; then
+  HASH="$1"
+  if [ "${HASH}" == "1" ]; then
       echo "1"
   else
-      echo $INDEX_FILE
+      INDEX_HASH=$(cat $GITDIR/index | grep "${HASH}" | awk '{print $2}')
+      if [ ! "${INDEX_HASH}" ]; then
+          echo "1"
+      else
+          echo ${INDEX_HASH}
+      fi
   fi
 }
 
-add_into_index() {
-  # TODO: 和当前的head比较是否有diff，如果有，允许加入到index，如果没有，不做任何事情.
-  # 如果没有head（当前默认只支持一个head，不支持branch功能）即全部允许加入到index.
+write_object() {
+  CONTENT_PATH="$1"
+  TYPE="$2"
+  HASH="$3"
+  OBJECTS_DIR_PREFIX=${HASH:0:2}
+  OBJECTS_DESTINATION=${HASH:2}
+  if [ ! -d $GITDIR/objects/${OBJECTS_DIR_PREFIX} ]; then
+      mkdir -p $GITDIR/objects/${OBJECTS_DIR_PREFIX}
+  fi
+  echo $(gitcontent $TYPE $CONTENT_PATH) > $GITDIR/objects/${OBJECTS_DIR_PREFIX}/${OBJECTS_DESTINATION}
+}
 
-  FILENAME="$1"
-  FILE_BLOB_OBJECT=$(githash "blob" $FILENAME)
-  echo "xgit added the following files into index: "
+calc_blob() {
+  NAME="$1"
+  EXEC_MODULE="$2"
+  FILE_BLOB_OBJECT_HASH=$(githash "blob" $NAME)
+  if [ "EXIST_"$EXEC_MODULE != "EXIST_" ]; then
+      $EXEC_MODULE "$NAME" "$NAME" "blob" "${FILE_BLOB_OBJECT_HASH}" > /dev/null 2>&1
+  fi
+  echo "blob ${FILE_BLOB_OBJECT_HASH} $NAME"
+}
+
+add_blob() {
+  NAME="$1"
+  echo $(calc_blob $NAME write_and_add_index)
+}
+
+calc_tree() {
+  DIRNAME="$1"
+  EXEC_MODULE="$2"
+  if [ -f "${TMP_CACHE_NAME}${DIRNAME}" ]; then
+      true > "${TMP_CACHE_NAME}${DIRNAME}"
+  else
+      touch "${TMP_CACHE_NAME}${DIRNAME}"
+  fi
+  for fp in $(ls $DIRNAME/*)
+  do
+      if [ -d $fp ]; then
+          FP_LINE=$(calc_tree $fp $EXEC_MODULE)
+          echo "${FP_LINE}" >> "${TMP_CACHE_NAME}${DIRNAME}"
+      elif [ -f $fp ]; then
+          FP_LINE=$(calc_blob $fp $EXEC_MODULE)
+          echo "${FP_LINE}" >> "${TMP_CACHE_NAME}${DIRNAME}"
+      else
+          die 1 "invalid filepath $fp"
+      fi
+  done
+  DIR_TREE_OBJECT_HASH=$(githash "tree" "${TMP_CACHE_NAME}${DIRNAME}")
+  if [ "EXIST_"$EXEC_MODULE != "EXIST_" ]; then
+      $EXEC_MODULE "${DIRNAME}" "${TMP_CACHE_NAME}${DIRNAME}" "tree" "${DIR_TREE_OBJECT_HASH}" > /dev/null 2>&1
+  fi
+  # clean tmp.
+  \rm -f "${TMP_CACHE_NAME}${DIRNAME}"
+  echo "tree ${DIR_TREE_OBJECT_HASH} $DIRNAME"
+}
+
+add_tree() {
+  DIRNAME="$1"
+  echo $(calc_tree $DIRNAME write_and_add_index)
+}
+
+write_and_add_index() {
+  NAME="$1"
+  CONTENT_PATH="$2"
+  TYPE="$3"
+  HASH="$4"
+  write_object "${CONTENT_PATH}" "${TYPE}" "${HASH}"
+  add_into_index "${TYPE} ${HASH} ${NAME}"
+}
+
+add_into_index() {
+  INPUT_VALUES="$@"
   if [ ! -f $GITDIR/index ]; then
       touch $GITDIR/index
   fi
 
-  INDEX_FILE=$(check_in_index $FILENAME)
-  if [ $INDEX_FILE -eq 1 ]; then
-      echo "adding ${FILENAME} to index"
-      echo "${FILENAME} ${FILE_BLOB_OBJECT}" >> $GITDIR/index
-  else
-      echo "updating ${FILENAME} inside index"
-      grep -v "${FILENAME}" $GITDIR/index > $GITDIR/replace.index
-      mv $GITDIR/replace.index $GITDIR/index
-      echo "${FILENAME} ${FILE_BLOB_OBJECT}" >> $GITDIR/index
-  fi
+  INPUT_HASH=$(echo $INPUT_VALUES|awk '{print $2}')
+  INDEX_HASH=$(check_in_index $INPUT_HASH)
 
-  OBJECTS_DIR_PREFIX=${FILE_BLOB_OBJECT:0:2}
-  OBJECTS_DESTINATION=${FILE_BLOB_OBJECT:2}
-  if [ ! -d $GITDIR/objects/${OBJECTS_DIR_PREFIX} ]; then
-      mkdir -p $GITDIR/objects/${OBJECTS_DIR_PREFIX}
+  if [ "${INDEX_HASH}" == "1" ]; then
+      echo "${INPUT_VALUES}" >> $GITDIR/index
+  else
+      if [[ ${INDEX_HASH} == *"${INPUT_HASH}"* ]]; then
+          cp $GITDIR/index $GITDIR/replace.index
+          cat $GITDIR/replace.index | sed '/'${INPUT_HASH}'/d' > $GITDIR/index
+          \rm -f $GITDIR/replace.index
+          echo "${INPUT_VALUES}" >> $GITDIR/index
+      fi
   fi
-  echo -n $(gitcontent "blob" $FILENAME) > $GITDIR/objects/${OBJECTS_DIR_PREFIX}/${OBJECTS_DESTINATION}
+}
+
+commit_into_repo() {
+  COMMIT_MESSAGE=$1
+  if [ ! -s $GITDIR/index ]; then
+      die 1 "Nothing to commit."
+  fi
+  # first, create tree commit.
+  for fc in $(cat $GITDIR/index)
+  do
+      echo $fc
+  done
+  # calculate index tree hash and create the tree object.
+  # finally, create commit object.
+  echo "TODO: create commit object with message ${COMMIT_MESSAGE}"
 }
 
 show_status() {
@@ -171,20 +238,34 @@ show_status() {
   do
       # compare with refs or staging area.
       if [ -f $GITDIR/refs/heads/$HEAD_DEFAULT ]; then
-          # 如果index里包含该文件，和index里的object对比
-          # 其次，找到refs指向的commit，然后根据这个commit遍历对应的tree和blob，对比差异.
-          CURRENT_FP_GITHASH=$(githash "blob" $fp)
-          echo "comparing $fp hashvalue $CURRENT_FP_GITHASH with stage and repository."
+          echo "TODO: comparing current working area tree with staging or repo."
       else
-          # 比较当前index区域，然后展示和work area diff.
-          CURRENT_FP_GITHASH=$(githash "blob" $fp)
-          INDEX_FILE=$(check_in_index $fp)
-          if [ "$INDEX_FILE" == "1" ]; then
-              echo "Untracked: $fp"
-          else
-              if [ "$INDEX_FILE" != "$CURRENT_FP_GITHASH" ]; then
-                echo "$fp"
+          if [ -f $fp ]; then
+              CURRENT_FP_HASH_LINE=$(calc_blob $fp)
+              CURRENT_FP_HASH=$(echo "${CURRENT_FP_HASH_LINE}" | awk '{print $2}' || echo "1")
+              INDEX_HASH=$(check_in_index $CURRENT_FP_HASH)
+              if [ "$INDEX_HASH" == "1" ]; then
+                  echo "Untracked: $fp"
+              else
+                  CHECK_EXIST=$(echo "$CURRENT_FP_HASH_LINE" | grep "$INDEX_HASH" | awk '{print $2}' || echo "1")
+                  if [ "$CHECK_EXIST" == "1" ]; then
+                    echo "Changed: $fp"
+                  fi
               fi
+          elif [ -d $fp ]; then
+              CURRENT_FP_HASH_LINE=$(calc_tree $fp)
+              CURRENT_FP_HASH=$(echo "${CURRENT_FP_HASH_LINE}" | awk '{print $2}' || echo "1")
+              INDEX_HASH=$(check_in_index $CURRENT_FP_HASH)
+              if [ "$INDEX_HASH" == "1" ]; then
+                  echo "Untracked: $fp"
+              else
+                  CHECK_EXIST=$(echo "$CURRENT_FP_HASH_LINE" | grep "$INDEX_HASH" | awk '{print $2}' || echo "1")
+                  if [ "$CHECK_EXIST" == "1" ]; then
+                    echo "Changed: $fp"
+                  fi
+              fi
+          else
+              die 1 "invalid filepath $fp"
           fi
       fi
   done
@@ -215,9 +296,16 @@ case "$CMD" in
     check
     shift 1
     for fp in $@; do
-        for f in $fp; do
-            walkall $f add_into_index
-        done
+        # for each file or dir, create object.
+        # 1. for file, create blob object directly.
+        # 2. for dir, create tree object and collect the objects under the tree.
+        if [ -d $fp ]; then
+            add_tree $fp
+        elif [ -f $fp ]; then
+            add_blob $fp
+        else
+            echo "$fp not found"
+        fi
     done
     ;;
   cat-file)
@@ -226,10 +314,8 @@ case "$CMD" in
     cat_object_file $@
     ;;
   commit)
-    # 新建一个commit对象，将stage area内容提交，生成一个commit object
-    # commit object里包含parent及tree，tree object则表示当前一个目录的object树
-    # tree object里可以嵌套tree和blob，这样即可串联所有文件.
-    echo "TODO."
+    check
+    commit_into_repo $@
     ;;
   *)
     die 1 "Unknown command: $CMD."
