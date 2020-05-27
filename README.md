@@ -12,6 +12,7 @@ Shell version git implementation for fun.
 
 * `gitcontent` result didn't match the raw command execution..
 * only works for the first commit..
+* same file with different name would only accept one..
 
 ## Design
 
